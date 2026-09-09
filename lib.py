@@ -128,7 +128,12 @@ def save_manual_entry(account_key, statement_date, ending_balance, source_file,
     in sync too."""
     client = get_client()
     prior = latest_summary_for_account(account_key)
-    beginning_balance = prior["ending_balance"] if prior else None
+    # for a brand-new account with no prior entry, beginning has to equal
+    # ending (the table has a not-null constraint on beginning_balance, and
+    # with deposits/withdrawals both 0 for this row there's nothing else it
+    # could correctly be - same treatment as any account's first-ever
+    # statement elsewhere in this vault)
+    beginning_balance = prior["ending_balance"] if prior else ending_balance
 
     client.table("account_monthly_summaries").upsert({
         "account_key": account_key,
