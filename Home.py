@@ -11,6 +11,7 @@ import streamlit as st
 from lib import (
     require_passphrase,
     load_accounts,
+    load_institutions,
     load_monthly_summaries,
     net_worth_as_of,
     a_year_ago,
@@ -57,9 +58,19 @@ col3.metric("Change from a year ago", f"${current_total - year_ago_total:,.2f}",
 st.divider()
 st.subheader("By account")
 
+institutions = load_institutions()
+inst_names_present = sorted({
+    accounts_by_key.get(key, {}).get("institution", "")
+    for key in current_by_account
+    if accounts_by_key.get(key, {}).get("institution")
+})
+institution_filter = st.selectbox("Institution", ["All institutions"] + inst_names_present)
+
 rows = []
 for key, balance in current_by_account.items():
     acct = accounts_by_key.get(key, {})
+    if institution_filter != "All institutions" and acct.get("institution") != institution_filter:
+        continue
     rows.append({
         "Member": acct.get("member", ""),
         "Institution": acct.get("institution", ""),
@@ -74,5 +85,7 @@ st.dataframe(
     hide_index=True,
     width="stretch",
 )
+if institution_filter != "All institutions":
+    st.caption(f"Showing {len(df)} account(s) at {institution_filter} — ${df['Balance'].sum():,.2f} subtotal")
 
 st.caption(f"Figures as of the most recent statement on file: {latest_statement_date}")
