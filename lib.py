@@ -93,3 +93,61 @@ def net_worth_as_of(all_summaries, target_date):
 
 def a_year_ago(d: date) -> date:
     return d - relativedelta(years=1)
+
+
+def latest_summary_for_account(account_key):
+    """Most recent account_monthly_summaries row on file for one account (by
+    statement_date), or None if it has no history yet. Bypasses the cached
+    load_monthly_summaries() so it always reflects entries saved moments ago
+    (e.g. by the Manual Entry page) without waiting on the 5-minute cache."""
+    client = get_client()
+    resp = (
+        client.table("account_monthly_summaries")
+        .select("*")
+        .eq("account_key", account_key)
+        .order("statement_date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def save_manual_entry(account_key, statement_date, ending_balance, source_file,
+                       total_deposits=0.0, total_withdrawals=0.0, dividends_paid=0.0):
+    """Add (or correct) one manually-entered balance snapshot for an account
+    that doesn't have a working statement feed - e.g. LPL/Ascend right now.
+    beginning_balance is chained automatically from whatever the account's
+    latest prior entry was (same continuity convention used everywhere else
+    in this vault), so the caller never has to supply it. Upserts on
+    (account_key, statement_date): re-saving the same as-of date corrects
+    that entry in place rather than erroring, since a manual figure is more
+    likely to need a typo fix than a PDF-derived one ever was. Also nudges
+    the account's own last_statement_date/last_ending_balance forward when
+    this entry is the newest one on file, so the Accounts Directory page
+    (which reads those convenience fields, not the summaries table) stays
+    in sync too."""
+    client = get_client()
+    prior = latest_summary_for_account(account_key)
+    beginning_balance = prior["ending_balance"] if prior else None
+
+    client.table("account_monthly_summaries").upsert({
+        "account_key": account_key,
+        "statement_date": statement_date.isoformat(),
+        "beginning_balance": beginning_balance,
+        "total_deposits": round(total_deposits, 2),
+        "total_withdrawals": round(total_withdrawals, 2),
+        "ending_balance": round(ending_balance, 2),
+        "dividends_paid": round(dividends_paid, 2),
+        "source_file": source_file,
+    }, on_conflict="account_key,statement_date").execute()
+
+    acct = client.table("accounts").select("last_statement_date").eq("account_key", account_key).execute()
+    current_last = acct.data[0]["last_statement_date"] if acct.data else None
+    if current_last is None or statement_date.isoformat() >= current_last:
+        client.table("accounts").update({
+            "last_statement_date": statement_date.isoformat(),
+            "last_ending_balance": round(ending_balance, 2),
+        }).eq("account_key", account_key).execute()
+
+    load_monthly_summaries.clear()
+    load_accounts.clear()
