@@ -41,8 +41,8 @@ today = datetime.strptime(latest_statement_date, "%Y-%m-%d").date()
 one_year_ago = a_year_ago(today)
 
 current_total, current_by_account = net_worth_as_of(summaries, today)
-prior_total, _ = net_worth_as_of(summaries, datetime.strptime(prior_statement_date, "%Y-%m-%d").date()) if prior_statement_date else (None, {})
-year_ago_total, _ = net_worth_as_of(summaries, one_year_ago)
+prior_total, prior_by_account = net_worth_as_of(summaries, datetime.strptime(prior_statement_date, "%Y-%m-%d").date()) if prior_statement_date else (None, {})
+year_ago_total, year_ago_by_account = net_worth_as_of(summaries, one_year_ago)
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Net Worth", f"${current_total:,.2f}", help=f"As of {latest_statement_date}")
@@ -64,28 +64,53 @@ inst_names_present = sorted({
     for key in current_by_account
     if accounts_by_key.get(key, {}).get("institution")
 })
-institution_filter = st.selectbox("Institution", ["All institutions"] + inst_names_present)
+
+filter_col, toggle_col = st.columns([3, 2])
+institution_filter = filter_col.selectbox("Institution", ["All institutions"] + inst_names_present)
+show_closed = toggle_col.checkbox("Show closed / zero-balance accounts", value=False)
 
 rows = []
 for key, balance in current_by_account.items():
     acct = accounts_by_key.get(key, {})
     if institution_filter != "All institutions" and acct.get("institution") != institution_filter:
         continue
+    # "closed" here just means the latest balance is $0 - a paid-off card,
+    # a fully drawn-down IRA, a matured/closed CD, etc. - not tied to any
+    # one account_type, since zero balance can happen to any kind of account
+    is_closed = abs(balance) < 0.01
+    if is_closed and not show_closed:
+        continue
+    prior_balance = prior_by_account.get(key)
+    year_ago_balance = year_ago_by_account.get(key)
     rows.append({
         "Member": acct.get("member", ""),
         "Institution": acct.get("institution", ""),
         "Account": acct.get("display_name", key),
         "Type": acct.get("account_type", ""),
         "Balance": balance,
+        "+/- Since Last Update": (balance - prior_balance) if prior_balance is not None else None,
+        "+/- Since 1 Year Ago": (balance - year_ago_balance) if year_ago_balance is not None else None,
     })
-df = pd.DataFrame(rows).sort_values(["Member", "Type", "Account"])
+columns = ["Member", "Institution", "Account", "Type", "Balance", "+/- Since Last Update", "+/- Since 1 Year Ago"]
+df = pd.DataFrame(rows, columns=columns)
+if not df.empty:
+    df = df.sort_values(["Member", "Type", "Account"])
 st.dataframe(
     df,
-    column_config={"Balance": st.column_config.NumberColumn(format="$%.2f")},
+    column_config={
+        "Balance": st.column_config.NumberColumn(format="$%.2f"),
+        "+/- Since Last Update": st.column_config.NumberColumn(format="$%.2f"),
+        "+/- Since 1 Year Ago": st.column_config.NumberColumn(format="$%.2f"),
+    },
     hide_index=True,
     width="stretch",
 )
-if institution_filter != "All institutions":
-    st.caption(f"Showing {len(df)} account(s) at {institution_filter} — ${df['Balance'].sum():,.2f} subtotal")
+
+label = institution_filter if institution_filter != "All institutions" else "all accounts shown"
+sub1, sub2, sub3 = st.columns(3)
+sub1.metric(f"Subtotal — {label}", f"${df['Balance'].sum():,.2f}" if not df.empty else "$0.00")
+sub2.metric("+/- Since Last Update", f"${df['+/- Since Last Update'].sum():,.2f}" if not df.empty else "$0.00")
+sub3.metric("+/- Since 1 Year Ago", f"${df['+/- Since 1 Year Ago'].sum():,.2f}" if not df.empty else "$0.00")
+st.caption(f"{len(df)} account(s) shown" + ("" if show_closed else " (closed/zero-balance accounts hidden)"))
 
 st.caption(f"Figures as of the most recent statement on file: {latest_statement_date}")
