@@ -20,6 +20,28 @@ from lib import (
 st.set_page_config(page_title="Rosario Net Worth Vault", page_icon="\U0001F4B0", layout="wide")
 require_passphrase()
 
+# Compact styling for small screens (Allen's Dell laptop / mobile, 2026-09-11):
+# Streamlit's default metric numbers and top page padding are sized for a
+# big monitor. This trims both - smaller title, smaller st.metric value/
+# label/delta (covers BOTH the top Net Worth row and the bottom subtotal
+# row, since they're both built with st.metric), and less reserved space
+# above the title. Only affects this page. If a future Streamlit version
+# renames these internal data-testid hooks, this stops applying and the
+# page just falls back to normal (larger) sizing - harmless either way.
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 2rem; }
+    h1 { font-size: 1.6rem !important; }
+    div[data-testid="stMetric"] { padding: 0.15rem 0 !important; }
+    div[data-testid="stMetricValue"] { font-size: 1.3rem !important; }
+    div[data-testid="stMetricLabel"] { font-size: 0.78rem !important; }
+    div[data-testid="stMetricDelta"] { font-size: 0.78rem !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("Net Worth Vault")
 
 accounts = load_accounts()
