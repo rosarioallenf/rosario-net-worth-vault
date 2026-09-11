@@ -13,6 +13,7 @@ import streamlit as st
 
 from lib import (
     require_passphrase,
+    is_demo,
     load_accounts,
     load_institutions,
     latest_summary_for_account,
@@ -23,6 +24,19 @@ st.set_page_config(page_title="Manual Entry", page_icon="✏️", layout="wide")
 require_passphrase()
 
 st.title("Manual Entry")
+
+demo = is_demo()
+if demo:
+    # This page WRITES data, so it's the one place Demo Mode doesn't just
+    # swap in sample data - it blocks entirely. save_manual_entry() also
+    # no-ops on demo=True as a second layer of defense, but the real
+    # protection is simply never reaching it from here.
+    st.warning(
+        "Manual Entry is turned off in Demo Mode, since it saves real changes. "
+        "Reload the page and enter the real passphrase to use it."
+    )
+    st.stop()
+
 st.caption(
     "For accounts without a working statement feed - right now, that's the LPL "
     "Financial 'Shield' positions (Ascend's LPL statement archive is broken; "
