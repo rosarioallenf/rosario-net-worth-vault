@@ -64,15 +64,23 @@ inst_names_present = sorted({
     for key in current_by_account
     if accounts_by_key.get(key, {}).get("institution")
 })
+member_names_present = sorted({
+    accounts_by_key.get(key, {}).get("member", "")
+    for key in current_by_account
+    if accounts_by_key.get(key, {}).get("member")
+})
 
-filter_col, toggle_col = st.columns([3, 2])
-institution_filter = filter_col.selectbox("Institution", ["All institutions"] + inst_names_present)
+filter_col1, filter_col2, toggle_col = st.columns([3, 2, 2])
+institution_filter = filter_col1.selectbox("Institution", ["All institutions"] + inst_names_present)
+member_filter = filter_col2.selectbox("Member", ["All members"] + member_names_present)
 show_closed = toggle_col.checkbox("Show closed / zero-balance accounts", value=False)
 
 rows = []
 for key, balance in current_by_account.items():
     acct = accounts_by_key.get(key, {})
     if institution_filter != "All institutions" and acct.get("institution") != institution_filter:
+        continue
+    if member_filter != "All members" and acct.get("member") != member_filter:
         continue
     # "closed" here just means the latest balance is $0 - a paid-off card,
     # a fully drawn-down IRA, a matured/closed CD, etc. - not tied to any
@@ -83,18 +91,23 @@ for key, balance in current_by_account.items():
     prior_balance = prior_by_account.get(key)
     year_ago_balance = year_ago_by_account.get(key)
     rows.append({
-        "Member": acct.get("member", ""),
         "Institution": acct.get("institution", ""),
+        "Member": acct.get("member", ""),
         "Account": acct.get("display_name", key),
         "Type": acct.get("account_type", ""),
         "Balance": balance,
         "+/- Since Last Update": (balance - prior_balance) if prior_balance is not None else None,
         "+/- Since 1 Year Ago": (balance - year_ago_balance) if year_ago_balance is not None else None,
     })
-columns = ["Member", "Institution", "Account", "Type", "Balance", "+/- Since Last Update", "+/- Since 1 Year Ago"]
+columns = ["Institution", "Member", "Account", "Type", "Balance", "+/- Since Last Update", "+/- Since 1 Year Ago"]
 df = pd.DataFrame(rows, columns=columns)
 if not df.empty:
-    df = df.sort_values(["Member", "Type", "Account"])
+    # Institution leads the sort now, so every institution's accounts cluster
+    # together on screen - same "see it all, grouped" idea as the Accounts
+    # Directory redesign, just as one flat table instead of expanders (this
+    # page is meant for the daily at-a-glance total, not the survivor-facing
+    # per-institution detail that page carries).
+    df = df.sort_values(["Institution", "Member", "Account"])
 st.dataframe(
     df,
     column_config={
@@ -106,7 +119,12 @@ st.dataframe(
     width="stretch",
 )
 
-label = institution_filter if institution_filter != "All institutions" else "all accounts shown"
+label_parts = []
+if institution_filter != "All institutions":
+    label_parts.append(institution_filter)
+if member_filter != "All members":
+    label_parts.append(member_filter)
+label = " / ".join(label_parts) if label_parts else "all accounts shown"
 sub1, sub2, sub3 = st.columns(3)
 sub1.metric(f"Subtotal — {label}", f"${df['Balance'].sum():,.2f}" if not df.empty else "$0.00")
 sub2.metric("+/- Since Last Update", f"${df['+/- Since Last Update'].sum():,.2f}" if not df.empty else "$0.00")
