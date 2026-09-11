@@ -101,23 +101,32 @@ for key, balance in current_by_account.items():
     })
 columns = ["Institution", "Member", "Account", "Type", "Balance", "+/- Since Last Update", "+/- Since 1 Year Ago"]
 df = pd.DataFrame(rows, columns=columns)
-if not df.empty:
-    # Institution leads the sort now, so every institution's accounts cluster
-    # together on screen - same "see it all, grouped" idea as the Accounts
-    # Directory redesign, just as one flat table instead of expanders (this
-    # page is meant for the daily at-a-glance total, not the survivor-facing
-    # per-institution detail that page carries).
-    df = df.sort_values(["Institution", "Member", "Account"])
-st.dataframe(
-    df,
-    column_config={
-        "Balance": st.column_config.NumberColumn(format="$%.2f"),
-        "+/- Since Last Update": st.column_config.NumberColumn(format="$%.2f"),
-        "+/- Since 1 Year Ago": st.column_config.NumberColumn(format="$%.2f"),
-    },
-    hide_index=True,
-    width="stretch",
-)
+
+# Same collapsible-per-institution look as the Accounts Directory page, per
+# Allen's own request (2026-09-11) - one section per institution, all listed
+# on screen at once, ordered the same way (most accounts first) so the two
+# pages feel like the same system. Each section's own subtotal is right in
+# its header so you don't have to expand it just to see the number.
+if df.empty:
+    st.info("No accounts to show for this filter.")
+else:
+    inst_order = (
+        df.groupby("Institution")["Account"].count().sort_values(ascending=False).index.tolist()
+    )
+    for inst_name in inst_order:
+        inst_df = df[df["Institution"] == inst_name].sort_values(["Member", "Account"])
+        inst_subtotal = inst_df["Balance"].sum()
+        with st.expander(f"**{inst_name}**  —  {len(inst_df)} account(s)  —  ${inst_subtotal:,.2f}"):
+            st.dataframe(
+                inst_df.drop(columns=["Institution"]),
+                column_config={
+                    "Balance": st.column_config.NumberColumn(format="$%.2f"),
+                    "+/- Since Last Update": st.column_config.NumberColumn(format="$%.2f"),
+                    "+/- Since 1 Year Ago": st.column_config.NumberColumn(format="$%.2f"),
+                },
+                hide_index=True,
+                width="stretch",
+            )
 
 label_parts = []
 if institution_filter != "All institutions":
