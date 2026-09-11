@@ -10,6 +10,7 @@ import streamlit as st
 
 from lib import (
     require_passphrase,
+    is_demo,
     load_accounts,
     load_institutions,
     load_monthly_summaries,
@@ -44,8 +45,9 @@ st.markdown(
 
 st.title("Net Worth Vault")
 
-accounts = load_accounts()
-summaries = load_monthly_summaries()
+demo = is_demo()
+accounts = load_accounts(demo=demo)
+summaries = load_monthly_summaries(demo=demo)
 
 if not summaries:
     st.info("No statement data loaded yet.")
@@ -80,7 +82,7 @@ col3.metric("Change from a year ago", f"${current_total - year_ago_total:,.2f}",
 st.divider()
 st.subheader("By account")
 
-institutions = load_institutions()
+institutions = load_institutions(demo=demo)
 inst_names_present = sorted({
     accounts_by_key.get(key, {}).get("institution", "")
     for key in current_by_account
