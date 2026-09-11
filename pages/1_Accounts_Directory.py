@@ -10,7 +10,7 @@ rather than picking one at a time from a dropdown.
 import pandas as pd
 import streamlit as st
 
-from lib import require_passphrase, load_accounts, load_institutions
+from lib import require_passphrase, is_demo, load_accounts, load_institutions
 
 st.set_page_config(page_title="Accounts Directory", page_icon="\U0001F4C7", layout="wide")
 require_passphrase()
@@ -22,8 +22,9 @@ st.caption(
     "money' map. Click an institution to expand its contact info and accounts."
 )
 
-institutions = load_institutions()
-accounts = load_accounts()
+demo = is_demo()
+institutions = load_institutions(demo=demo)
+accounts = load_accounts(demo=demo)
 
 if not institutions:
     st.info("No institutions on file yet.")
