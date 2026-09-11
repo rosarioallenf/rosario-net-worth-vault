@@ -5,14 +5,15 @@ a dollar-amount range."""
 import pandas as pd
 import streamlit as st
 
-from lib import require_passphrase, load_accounts, load_transactions
+from lib import require_passphrase, is_demo, load_accounts, load_transactions
 
 st.set_page_config(page_title="Transactions", page_icon="\U0001F4C4", layout="wide")
 require_passphrase()
 
 st.title("Transactions")
 
-accounts = load_accounts()
+demo = is_demo()
+accounts = load_accounts(demo=demo)
 accounts_by_key = {a["account_key"]: a for a in accounts}
 labels = {a["account_key"]: f"{a['member']} - {a['display_name']} ({a['account_key']})" for a in accounts}
 
@@ -42,7 +43,7 @@ if filter_amount:
     )
 
 show_all = account_key == "All accounts"
-txns = load_transactions(account_key=None if show_all else account_key)
+txns = load_transactions(account_key=None if show_all else account_key, demo=demo)
 df = pd.DataFrame(txns)
 
 if not df.empty:
