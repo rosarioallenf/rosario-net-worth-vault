@@ -6,21 +6,50 @@ from supabase import create_client
 
 
 def require_passphrase():
-    """Gate every page behind one shared passphrase. Call this as the first
-    line of every page script. Stops the script (shows a login box instead
-    of the page content) until the correct passphrase has been entered once
-    per browser session."""
+    """Gate every page behind one shared passphrase - OR let a visitor
+    without the passphrase view a fixed, clearly-fake sample dataset instead
+    (built 2026-09-11 so Allen can show family, e.g. Pratixa, what the app
+    looks like/does without ever exposing his and Maria's real numbers).
+    Call this as the first line of every page script."""
     if st.session_state.get("authed"):
         return
+
+    if st.session_state.get("demo_mode"):
+        banner_col, exit_col = st.columns([5, 1])
+        banner_col.info(
+            "🔍 **Demo Mode** — you're viewing sample data, not Allen and Maria's real "
+            "numbers. Reload the page and enter the real passphrase to see actual data."
+        )
+        if exit_col.button("Exit demo"):
+            st.session_state["demo_mode"] = False
+            st.rerun()
+        return
+
     st.title("Rosario Net Worth Vault")
     pw = st.text_input("Passphrase", type="password")
-    if st.button("Enter") or pw:
+    enter_col, demo_col = st.columns(2)
+    if enter_col.button("Enter") or pw:
         if pw == st.secrets["APP_PASSPHRASE"]:
             st.session_state["authed"] = True
             st.rerun()
         elif pw:
             st.error("Incorrect passphrase.")
+    st.caption("Don't have the passphrase? You can still look around with sample data.")
+    if demo_col.button("View demo (sample data, no real numbers)"):
+        st.session_state["demo_mode"] = True
+        st.rerun()
     st.stop()
+
+
+def is_demo():
+    """True once a visitor has chosen "View demo" instead of the real
+    passphrase. Pass this into every load_*/save_* call below, every time -
+    each one takes an explicit `demo` argument (rather than checking session
+    state internally) specifically so Streamlit's data cache keys real and
+    demo results separately. Without that, a passphrase-less visitor could
+    end up being served Allen's real data straight out of the cache just
+    because someone else's authenticated session populated it first."""
+    return bool(st.session_state.get("demo_mode"))
 
 
 @st.cache_resource
@@ -33,29 +62,178 @@ def get_client():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SERVICE_KEY"])
 
 
+# ---------------------------------------------------------------------------
+# Demo-mode sample data - entirely hand-written fiction, never derived from
+# or connected to the real Supabase tables in any way. Two made-up members
+# ("Sam" and "Jordan") and institutions clearly labeled "Sample ___" so
+# nothing here could be mistaken for Allen and Maria's real accounts. Covers
+# a representative spread of account types (checking/savings/CD, credit
+# card, brokerage, Roth IRA, life insurance, real estate, vehicle) so a
+# visitor without the passphrase can see the full shape of what the app
+# does, end to end.
+# ---------------------------------------------------------------------------
+DEMO_INSTITUTIONS = [
+    {"name": "Sample Credit Union", "phone": "555-0100", "website": "example.com",
+     "mailing_address": "123 Sample St, Anytown, ST 00000", "member_service_email": None,
+     "notes": "Demo data - not a real institution."},
+    {"name": "Sample Brokerage", "phone": "555-0101", "website": "example.com",
+     "mailing_address": None, "member_service_email": None,
+     "notes": "Demo data - not a real institution."},
+    {"name": "Sample Insurance Co", "phone": "555-0102", "website": None,
+     "mailing_address": None, "member_service_email": None,
+     "notes": "Demo data - not a real institution."},
+    {"name": "Sample Card Co", "phone": "555-0103", "website": None,
+     "mailing_address": None, "member_service_email": None,
+     "notes": "Demo data - not a real institution."},
+    {"name": "Real Estate (Sample)", "phone": None, "website": None,
+     "mailing_address": None, "member_service_email": None,
+     "notes": "Demo data - not a real institution, just a grouping like the real vault uses."},
+    {"name": "Vehicles (Sample)", "phone": None, "website": None,
+     "mailing_address": None, "member_service_email": None,
+     "notes": "Demo data - not a real institution, just a grouping like the real vault uses."},
+]
+
+DEMO_ACCOUNTS = [
+    {"account_key": "demo-chk-1", "external_id": "1001", "institution": "Sample Credit Union",
+     "account_type": "checking", "display_name": "Everyday Checking", "member": "Sam",
+     "joint_owner": "Jordan", "first_statement_date": "2024-01-31", "last_statement_date": "2026-08-31",
+     "last_ending_balance": 8450.00, "last4": "1001", "notes": "Demo data - not real."},
+    {"account_key": "demo-sav-1", "external_id": "1002", "institution": "Sample Credit Union",
+     "account_type": "savings", "display_name": "Emergency Savings", "member": "Sam",
+     "joint_owner": "Jordan", "first_statement_date": "2024-01-31", "last_statement_date": "2026-08-31",
+     "last_ending_balance": 22000.00, "last4": "1002", "notes": "Demo data - not real."},
+    {"account_key": "demo-cd-1", "external_id": "1003", "institution": "Sample Credit Union",
+     "account_type": "cd", "display_name": "12-Month CD", "member": "Jordan",
+     "joint_owner": None, "first_statement_date": "2025-06-30", "last_statement_date": "2026-08-31",
+     "last_ending_balance": 10500.00, "last4": "1003", "notes": "Demo data - not real."},
+    {"account_key": "demo-brk-1", "external_id": "2001", "institution": "Sample Brokerage",
+     "account_type": "investment", "display_name": "Joint Brokerage Account", "member": "Sam",
+     "joint_owner": "Jordan", "first_statement_date": "2022-03-31", "last_statement_date": "2026-08-31",
+     "last_ending_balance": 145000.00, "last4": "2001", "notes": "Demo data - not real."},
+    {"account_key": "demo-ira-1", "external_id": "2002", "institution": "Sample Brokerage",
+     "account_type": "roth_ira", "display_name": "Sam's Roth IRA", "member": "Sam",
+     "joint_owner": None, "first_statement_date": "2021-12-31", "last_statement_date": "2026-08-31",
+     "last_ending_balance": 38000.00, "last4": "2002", "notes": "Demo data - not real."},
+    {"account_key": "demo-card-1", "external_id": "3001", "institution": "Sample Card Co",
+     "account_type": "credit_card", "display_name": "Rewards Visa", "member": "Jordan",
+     "joint_owner": None, "first_statement_date": "2023-05-31", "last_statement_date": "2026-08-31",
+     "last_ending_balance": -1250.00, "last4": "3001",
+     "notes": "Demo data - not real. Negative balance = amount owed, same convention as the real vault."},
+    {"account_key": "demo-life-1", "external_id": "4001", "institution": "Sample Insurance Co",
+     "account_type": "life_insurance", "display_name": "Indexed Universal Life Policy", "member": "Jordan",
+     "joint_owner": None, "first_statement_date": "2022-07-31", "last_statement_date": "2026-07-31",
+     "last_ending_balance": 61000.00, "last4": "4001", "notes": "Demo data - not real."},
+    {"account_key": "demo-home-1", "external_id": "5001", "institution": "Real Estate (Sample)",
+     "account_type": "real_estate", "display_name": "Primary Home", "member": "Sam",
+     "joint_owner": "Jordan", "first_statement_date": "2026-01-01", "last_statement_date": "2026-01-01",
+     "last_ending_balance": 425000.00, "last4": "5001", "notes": "Demo data - not real."},
+    {"account_key": "demo-car-1", "external_id": "6001", "institution": "Vehicles (Sample)",
+     "account_type": "vehicle", "display_name": "Family SUV", "member": "Jordan",
+     "joint_owner": "Sam", "first_statement_date": "2026-01-01", "last_statement_date": "2026-01-01",
+     "last_ending_balance": 28000.00, "last4": "6001", "notes": "Demo data - not real."},
+]
+
+DEMO_SUMMARIES = [
+    # A year-ago + latest snapshot per account - just enough for Home's
+    # "change since last update" / "change from a year ago" math to have
+    # something real to compute against.
+    {"account_key": "demo-chk-1", "statement_date": "2025-08-31", "beginning_balance": 7900.00,
+     "total_deposits": 500.0, "total_withdrawals": 0.0, "ending_balance": 8100.00,
+     "dividends_paid": 0.0, "source_file": "demo"},
+    {"account_key": "demo-chk-1", "statement_date": "2026-08-31", "beginning_balance": 8100.00,
+     "total_deposits": 350.0, "total_withdrawals": 0.0, "ending_balance": 8450.00,
+     "dividends_paid": 0.0, "source_file": "demo"},
+    {"account_key": "demo-sav-1", "statement_date": "2025-08-31", "beginning_balance": 20500.00,
+     "total_deposits": 500.0, "total_withdrawals": 0.0, "ending_balance": 21000.00,
+     "dividends_paid": 40.0, "source_file": "demo"},
+    {"account_key": "demo-sav-1", "statement_date": "2026-08-31", "beginning_balance": 21000.00,
+     "total_deposits": 950.0, "total_withdrawals": 0.0, "ending_balance": 22000.00,
+     "dividends_paid": 55.0, "source_file": "demo"},
+    {"account_key": "demo-cd-1", "statement_date": "2026-08-31", "beginning_balance": 10000.00,
+     "total_deposits": 0.0, "total_withdrawals": 0.0, "ending_balance": 10500.00,
+     "dividends_paid": 500.0, "source_file": "demo"},
+    {"account_key": "demo-brk-1", "statement_date": "2025-08-31", "beginning_balance": 118000.00,
+     "total_deposits": 0.0, "total_withdrawals": 0.0, "ending_balance": 124000.00,
+     "dividends_paid": 900.0, "source_file": "demo"},
+    {"account_key": "demo-brk-1", "statement_date": "2026-08-31", "beginning_balance": 124000.00,
+     "total_deposits": 0.0, "total_withdrawals": 0.0, "ending_balance": 145000.00,
+     "dividends_paid": 1100.0, "source_file": "demo"},
+    {"account_key": "demo-ira-1", "statement_date": "2025-08-31", "beginning_balance": 30000.00,
+     "total_deposits": 6500.0, "total_withdrawals": 0.0, "ending_balance": 34000.00,
+     "dividends_paid": 0.0, "source_file": "demo"},
+    {"account_key": "demo-ira-1", "statement_date": "2026-08-31", "beginning_balance": 34000.00,
+     "total_deposits": 7000.0, "total_withdrawals": 0.0, "ending_balance": 38000.00,
+     "dividends_paid": 0.0, "source_file": "demo"},
+    {"account_key": "demo-card-1", "statement_date": "2025-08-31", "beginning_balance": -900.00,
+     "total_deposits": 0.0, "total_withdrawals": 0.0, "ending_balance": -1050.00,
+     "dividends_paid": 0.0, "source_file": "demo"},
+    {"account_key": "demo-card-1", "statement_date": "2026-08-31", "beginning_balance": -1050.00,
+     "total_deposits": 0.0, "total_withdrawals": 0.0, "ending_balance": -1250.00,
+     "dividends_paid": 0.0, "source_file": "demo"},
+    {"account_key": "demo-life-1", "statement_date": "2025-07-31", "beginning_balance": 48000.00,
+     "total_deposits": 10000.0, "total_withdrawals": 0.0, "ending_balance": 52000.00,
+     "dividends_paid": 1200.0, "source_file": "demo"},
+    {"account_key": "demo-life-1", "statement_date": "2026-07-31", "beginning_balance": 52000.00,
+     "total_deposits": 10000.0, "total_withdrawals": 0.0, "ending_balance": 61000.00,
+     "dividends_paid": 1800.0, "source_file": "demo"},
+    {"account_key": "demo-home-1", "statement_date": "2026-01-01", "beginning_balance": 425000.00,
+     "total_deposits": 0.0, "total_withdrawals": 0.0, "ending_balance": 425000.00,
+     "dividends_paid": 0.0, "source_file": "demo - estimate"},
+    {"account_key": "demo-car-1", "statement_date": "2026-01-01", "beginning_balance": 28000.00,
+     "total_deposits": 0.0, "total_withdrawals": 0.0, "ending_balance": 28000.00,
+     "dividends_paid": 0.0, "source_file": "demo - estimate"},
+]
+
+DEMO_TRANSACTIONS = [
+    {"account_key": "demo-chk-1", "statement_date": "2026-08-31", "txn_date": "2026-08-05",
+     "deposit": 350.0, "withdrawal": None, "balance": 8450.00,
+     "description": "Paycheck deposit (sample)", "source_file": "demo"},
+    {"account_key": "demo-sav-1", "statement_date": "2026-08-31", "txn_date": "2026-08-10",
+     "deposit": 950.0, "withdrawal": None, "balance": 22000.00,
+     "description": "Transfer from checking (sample)", "source_file": "demo"},
+    {"account_key": "demo-card-1", "statement_date": "2026-08-31", "txn_date": "2026-08-15",
+     "deposit": None, "withdrawal": 200.0, "balance": -1250.00,
+     "description": "Sample grocery purchase", "source_file": "demo"},
+    {"account_key": "demo-ira-1", "statement_date": "2026-08-31", "txn_date": "2026-01-15",
+     "deposit": 7000.0, "withdrawal": None, "balance": 38000.00,
+     "description": "Annual Roth contribution (sample)", "source_file": "demo"},
+]
+
+
 @st.cache_data(ttl=300)
-def load_accounts():
+def load_accounts(demo=False):
+    if demo:
+        return DEMO_ACCOUNTS
     client = get_client()
     resp = client.table("accounts").select("*").order("account_key").execute()
     return resp.data
 
 
 @st.cache_data(ttl=300)
-def load_institutions():
+def load_institutions(demo=False):
+    if demo:
+        return DEMO_INSTITUTIONS
     client = get_client()
     resp = client.table("institutions").select("*").execute()
     return resp.data
 
 
 @st.cache_data(ttl=300)
-def load_monthly_summaries():
+def load_monthly_summaries(demo=False):
+    if demo:
+        return DEMO_SUMMARIES
     client = get_client()
     resp = client.table("account_monthly_summaries").select("*").execute()
     return resp.data
 
 
 @st.cache_data(ttl=300)
-def load_transactions(account_key=None):
+def load_transactions(account_key=None, demo=False):
+    if demo:
+        rows = DEMO_TRANSACTIONS
+        if account_key:
+            rows = [r for r in rows if r["account_key"] == account_key]
+        return sorted(rows, key=lambda r: r["txn_date"], reverse=True)
     client = get_client()
     q = client.table("transactions").select("*")
     if account_key:
@@ -95,11 +273,16 @@ def a_year_ago(d: date) -> date:
     return d - relativedelta(years=1)
 
 
-def latest_summary_for_account(account_key):
+def latest_summary_for_account(account_key, demo=False):
     """Most recent account_monthly_summaries row on file for one account (by
     statement_date), or None if it has no history yet. Bypasses the cached
     load_monthly_summaries() so it always reflects entries saved moments ago
-    (e.g. by the Manual Entry page) without waiting on the 5-minute cache."""
+    (e.g. by the Manual Entry page) without waiting on the 5-minute cache.
+    (In practice the Manual Entry page blocks itself entirely in Demo Mode,
+    so the demo branch here is just a safety net, not the only guard.)"""
+    if demo:
+        candidates = [r for r in DEMO_SUMMARIES if r["account_key"] == account_key]
+        return max(candidates, key=lambda r: r["statement_date"]) if candidates else None
     client = get_client()
     resp = (
         client.table("account_monthly_summaries")
@@ -113,7 +296,7 @@ def latest_summary_for_account(account_key):
 
 
 def save_manual_entry(account_key, statement_date, ending_balance, source_file,
-                       total_deposits=0.0, total_withdrawals=0.0, dividends_paid=0.0):
+                       total_deposits=0.0, total_withdrawals=0.0, dividends_paid=0.0, demo=False):
     """Add (or correct) one manually-entered balance snapshot for an account
     that doesn't have a working statement feed - e.g. LPL/Ascend right now.
     beginning_balance is chained automatically from whatever the account's
@@ -125,7 +308,15 @@ def save_manual_entry(account_key, statement_date, ending_balance, source_file,
     the account's own last_statement_date/last_ending_balance forward when
     this entry is the newest one on file, so the Accounts Directory page
     (which reads those convenience fields, not the summaries table) stays
-    in sync too."""
+    in sync too.
+
+    demo=True is a no-op (returns immediately, touches nothing) - Demo Mode
+    is meant to be looked at, not written to, and the Manual Entry page
+    itself never even renders its form in Demo Mode, so this should never
+    actually be reached with demo=True. Kept as a second layer of defense
+    rather than relying on the page alone."""
+    if demo:
+        return
     client = get_client()
     prior = latest_summary_for_account(account_key)
     # for a brand-new account with no prior entry, beginning has to equal
