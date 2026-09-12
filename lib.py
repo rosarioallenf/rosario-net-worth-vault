@@ -333,19 +333,22 @@ def load_transactions(account_key=None, demo=False):
 
 CHASE_BANK_CSV_COLUMNS = {"Details", "Posting Date", "Description", "Amount", "Type", "Balance"}
 CHASE_CARD_CSV_COLUMNS = {"Transaction Date", "Post Date", "Description", "Type", "Amount"}
+ASCEND_BANK_CSV_COLUMNS = {"Account ID", "Transaction ID", "Date", "Description", "Amount", "Balance"}
 
 
 def detect_csv_profile(df):
     """Given a freshly-read CSV as a DataFrame, return which known
-    institution/account-type profile it matches ('chase_bank', 'chase_card'),
-    or None if it doesn't match anything built yet. Matching is by column
-    presence, not file name, since Allen renames/downloads these however his
-    browser or the bank names them."""
+    institution/account-type profile it matches ('chase_bank', 'chase_card',
+    'ascend_bank'), or None if it doesn't match anything built yet. Matching
+    is by column presence, not file name, since Allen renames/downloads
+    these however his browser or the bank names them."""
     cols = set(df.columns)
     if CHASE_BANK_CSV_COLUMNS.issubset(cols):
         return "chase_bank"
     if CHASE_CARD_CSV_COLUMNS.issubset(cols):
         return "chase_card"
+    if ASCEND_BANK_CSV_COLUMNS.issubset(cols):
+        return "ascend_bank"
     return None
 
 
@@ -380,6 +383,65 @@ def parse_chase_bank_csv(raw_bytes):
         })
     last_row = df.iloc[-1]
     return txns, round(float(last_row["Balance"]), 2), last_row["Posting Date"].isoformat()
+
+
+def _ascend_money(val):
+    """Ascend's own CSV export writes Amount/Balance as literal dollar
+    strings - '$47.05', '-$262.62' - rather than plain numbers. Strip the
+    '$' and any thousands comma, then let float() handle the sign (Ascend
+    always puts the '-' before the '$', which float() parses fine once the
+    '$' itself is gone)."""
+    return float(str(val).replace("$", "").replace(",", ""))
+
+
+def parse_ascend_bank_csv(raw_bytes):
+    """Parse an Ascend Federal Credit Union 'Transactions' CSV export -
+    checking, savings, or money market, anything with Ascend's own per-row
+    running balance. Same shape and same authoritative-balance convention
+    as parse_chase_bank_csv: Ascend already gives its own real balance on
+    every row, so the ending balance is read straight off the last row
+    rather than computed.
+
+    Folds the optional Category and Check Number columns into the
+    description, same convention as Chase's optional Category/Card columns.
+    'Tags' and 'Transaction ID' are dropped - Tags is blank in every sample
+    row Allen's Ascend account has produced, and Transaction ID is Ascend's
+    own internal reference with nowhere to live in this vault's schema.
+
+    Ascend's own 'Account ID' column (e.g. '3386320-S0007') identifies
+    which physical sub-account a file belongs to, but isn't used to
+    auto-select the account here - same as Chase, Allen picks the account
+    from the dropdown above and the import page shows this column's value
+    in the preview so he can visually confirm it matches before importing.
+
+    Returns (transactions, ending_balance, statement_date) - same shape as
+    parse_chase_bank_csv, plus each transaction dict also carries
+    'source_account_id' (the file's own Account ID for that row) purely for
+    the page's preview table - commit_csv_import doesn't write it anywhere,
+    since the transactions table has no column for it."""
+    df = pd.read_csv(io.BytesIO(raw_bytes), index_col=False)
+    df["Date"] = pd.to_datetime(df["Date"], format="%m/%d/%y").dt.date
+    df = df.sort_values("Date")
+    txns = []
+    for _, row in df.iterrows():
+        amount = _ascend_money(row["Amount"])
+        description = str(row["Description"]).strip()
+        category = row.get("Category")
+        if pd.notna(category) and str(category).strip():
+            description = f"{description} ({category})"
+        check_no = row.get("Check Number")
+        if pd.notna(check_no):
+            description = f"{description} [check #{int(check_no)}]"
+        txns.append({
+            "txn_date": row["Date"].isoformat(),
+            "description": description,
+            "deposit": amount if amount > 0 else None,
+            "withdrawal": round(abs(amount), 2) if amount < 0 else None,
+            "balance": round(_ascend_money(row["Balance"]), 2),
+            "source_account_id": row.get("Account ID"),
+        })
+    last_row = df.iloc[-1]
+    return txns, round(_ascend_money(last_row["Balance"]), 2), last_row["Date"].isoformat()
 
 
 def parse_chase_creditcard_csv(raw_bytes):
@@ -462,24 +524,52 @@ def roll_forward_balance(prior_ending_balance, new_txns):
 
 
 def find_new_transactions(account_key, parsed_txns, demo=False):
-    """Split freshly parsed transactions into (new, already_on_file) by
-    comparing against what's already stored for this account, matching on
-    (txn_date, description, signed amount). This isn't a perfect
-    fingerprint - two genuinely separate but identical-looking transactions
-    (same merchant, same day, same amount) would look like one duplicate -
-    which is exactly why the import page shows every matched row explicitly
-    rather than just printing a count, so Allen can catch that rare case
-    before confirming rather than have it silently dropped."""
+    """Split freshly parsed transactions into (new, already_on_file) two
+    different ways, since a transaction can be "already covered" without
+    being an exact text match:
+
+    1. Textual fingerprint - matching on (txn_date, description, signed
+       amount) against what's already stored for this account. This isn't a
+       perfect fingerprint - two genuinely separate but identical-looking
+       transactions (same merchant, same day, same amount) would look like
+       one duplicate - which is exactly why the import page shows every
+       matched row explicitly rather than just printing a count, so Allen
+       can catch that rare case before confirming rather than have it
+       silently dropped.
+
+    2. Statement-coverage boundary - ANY transaction dated on or before the
+       account's own last_statement_date is treated as already covered,
+       full stop, regardless of whether its exact wording matches anything
+       already on file. This matters whenever an account's history came
+       from more than one source - e.g. Ascend statements loaded from PDFs
+       for years, now switching to CSV exports going forward: the same
+       real transaction gets described differently by the two sources
+       (the PDF parser writes 'Deposit ACH Acorns Invest | TYPE: ...',
+       Ascend's own CSV export writes 'Deposit ACH Acorns Invest TYPE: ...
+       Entry Class Code: PPD' for that identical transaction), so a purely
+       textual fingerprint would miss the overlap entirely and silently
+       double up a whole month of transactions. Statements are complete,
+       non-overlapping monthly records, so this boundary is a hard
+       guarantee, not a heuristic - if the account is already covered
+       through a given date, nothing dated at or before it is ever new."""
     existing = load_transactions(account_key=account_key, demo=demo)
     existing_keys = set()
     for t in existing:
         amt = t["deposit"] if t.get("deposit") is not None else -(t.get("withdrawal") or 0)
         existing_keys.add((t["txn_date"], (t.get("description") or "").strip(), round(float(amt), 2)))
+
+    accounts = load_accounts(demo=demo)
+    acct = next((a for a in accounts if a["account_key"] == account_key), None)
+    last_statement_date = acct.get("last_statement_date") if acct else None
+
     new_txns, dup_txns = [], []
     for t in parsed_txns:
         amt = t["deposit"] if t["deposit"] is not None else -(t["withdrawal"] or 0)
         key = (t["txn_date"], t["description"], round(float(amt), 2))
-        (dup_txns if key in existing_keys else new_txns).append(t)
+        already_covered_by_prior_statement = (
+            last_statement_date is not None and t["txn_date"] <= last_statement_date
+        )
+        (dup_txns if (key in existing_keys or already_covered_by_prior_statement) else new_txns).append(t)
     return new_txns, dup_txns
 
 
