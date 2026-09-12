@@ -1,5 +1,8 @@
 """Shared helpers for the Rosario Net Worth Vault Streamlit app."""
+import io
 from datetime import date
+
+import pandas as pd
 from dateutil.relativedelta import relativedelta
 import streamlit as st
 from supabase import create_client
@@ -303,6 +306,257 @@ def load_transactions(account_key=None, demo=False):
         q = q.eq("account_key", account_key)
     resp = q.order("txn_date", desc=True).execute()
     return resp.data
+
+
+# ---------------------------------------------------------------------------
+# CSV statement import (built 2026-09-13, starting with Chase - other
+# institutions get added the same way: one detector entry + one parser
+# function, below). Each institution's downloadable CSV has its own fixed
+# column layout, so rather than one generic parser this is a small registry
+# of per-institution profiles, matched by which columns are actually present
+# in the uploaded file.
+#
+# The core design point Allen and Claude worked through together: a bank
+# account's CSV (Chase checking/savings) already includes a running Balance
+# column - Chase gives us the actual bank-stated balance directly, so no
+# math is needed, same reliability as typing in a number from a PDF
+# statement. A credit card's CSV has no such column, since the true
+# statement balance depends on things (interest, fees) outside the raw
+# transaction list - so for cards, the new ending balance has to be
+# computed by rolling forward from whatever the account's last confirmed
+# balance already was. Handily, Chase's own signed Amount column (negative
+# for a purchase, positive for a payment or return) lines up exactly with
+# this vault's own "negative ending_balance = amount owed" convention for
+# credit cards, so the roll-forward is just plain addition - no sign-
+# flipping by transaction Type needed.
+# ---------------------------------------------------------------------------
+
+CHASE_BANK_CSV_COLUMNS = {"Details", "Posting Date", "Description", "Amount", "Type", "Balance"}
+CHASE_CARD_CSV_COLUMNS = {"Transaction Date", "Post Date", "Description", "Type", "Amount"}
+
+
+def detect_csv_profile(df):
+    """Given a freshly-read CSV as a DataFrame, return which known
+    institution/account-type profile it matches ('chase_bank', 'chase_card'),
+    or None if it doesn't match anything built yet. Matching is by column
+    presence, not file name, since Allen renames/downloads these however his
+    browser or the bank names them."""
+    cols = set(df.columns)
+    if CHASE_BANK_CSV_COLUMNS.issubset(cols):
+        return "chase_bank"
+    if CHASE_CARD_CSV_COLUMNS.issubset(cols):
+        return "chase_card"
+    return None
+
+
+def parse_chase_bank_csv(raw_bytes):
+    """Parse a Chase checking/savings 'Download activity' CSV. Returns
+    (transactions, ending_balance, statement_date):
+      - transactions: list of dicts (txn_date, description, deposit,
+        withdrawal, balance), oldest first.
+      - ending_balance: taken directly from the CSV's own Balance column on
+        the most recent (max Posting Date) row - Chase already gives us the
+        real bank-stated balance, so this isn't computed from the
+        transactions at all.
+      - statement_date: that same most recent Posting Date.
+    """
+    # index_col=False: Chase's own bank-CSV export ends every data row with a
+    # trailing ",," (one more field than the header row has), which pandas
+    # would otherwise interpret as "this file has an implicit index column"
+    # and silently shift every named column one position off from the real
+    # data. index_col=False tells pandas not to do that guess.
+    df = pd.read_csv(io.BytesIO(raw_bytes), index_col=False)
+    df["Posting Date"] = pd.to_datetime(df["Posting Date"], format="%m/%d/%Y").dt.date
+    df = df.sort_values("Posting Date")
+    txns = []
+    for _, row in df.iterrows():
+        amount = float(row["Amount"])
+        txns.append({
+            "txn_date": row["Posting Date"].isoformat(),
+            "description": str(row["Description"]).strip(),
+            "deposit": amount if amount > 0 else None,
+            "withdrawal": round(abs(amount), 2) if amount < 0 else None,
+            "balance": round(float(row["Balance"]), 2),
+        })
+    last_row = df.iloc[-1]
+    return txns, round(float(last_row["Balance"]), 2), last_row["Posting Date"].isoformat()
+
+
+def parse_chase_creditcard_csv(raw_bytes):
+    """Parse a Chase credit card 'Download activity' CSV into a flat list of
+    transactions - txn_date, description, deposit/withdrawal. No balance and
+    no ending-balance total here: unlike the bank CSV, Chase's credit-card
+    export has no running-balance column, AND a fresh "download activity"
+    file routinely includes transactions from prior months that the vault
+    already has on file, mixed in alongside the genuinely new ones (Chase
+    doesn't limit the export to "since your last download"). Rolling a
+    balance forward through every row in the file - including that stale
+    overlap - would double-count it and produce a wrong total.
+
+    Uses 'Transaction Date' (when the purchase happened) as this vault's
+    txn_date, not 'Post Date' (when Chase settled it) - the truer "the
+    transaction's own date" per this vault's own schema comment, though it
+    does mean a card's txn_date and a bank account's txn_date aren't quite
+    the same kind of date (posted vs. incurred) - worth knowing if the two
+    are ever compared side by side.
+
+    Folds the optional Category and Card columns into the description
+    (rather than adding new database columns for them) - Category shows up
+    when Chase provides it, Card only shows up when more than one physical
+    card exists on the account (e.g., an authorized user's card).
+
+    Call find_new_transactions() on the result first to drop the stale
+    overlap, THEN roll_forward_balance() on just the new subset to get a
+    correct suggested ending balance - never roll forward over this
+    function's raw output directly."""
+    # index_col=False for the same reason as parse_chase_bank_csv above -
+    # harmless here even on files that don't have the extra trailing field.
+    df = pd.read_csv(io.BytesIO(raw_bytes), index_col=False)
+    df["Transaction Date"] = pd.to_datetime(df["Transaction Date"], format="%m/%d/%Y").dt.date
+    df = df.sort_values("Transaction Date")
+    txns = []
+    for _, row in df.iterrows():
+        amount = float(row["Amount"])
+        description = str(row["Description"]).strip()
+        category = row.get("Category")
+        if pd.notna(category) and str(category).strip():
+            description = f"{description} ({category})"
+        card = row.get("Card")
+        if pd.notna(card):
+            description = f"{description} [card ending {card}]"
+        txns.append({
+            "txn_date": row["Transaction Date"].isoformat(),
+            "description": description,
+            "deposit": amount if amount > 0 else None,
+            "withdrawal": round(abs(amount), 2) if amount < 0 else None,
+        })
+    statement_date = df["Transaction Date"].max().isoformat()
+    return txns, statement_date
+
+
+def roll_forward_balance(prior_ending_balance, new_txns):
+    """Compute a suggested ending balance for an import with no authoritative
+    balance column (credit cards): prior known balance plus the sum of every
+    NEW (already deduped via find_new_transactions) transaction's signed
+    amount, in date order - a Sale is negative (increases what's owed), a
+    Payment or Return is positive (reduces it), which already matches this
+    vault's own "negative ending_balance = amount owed" convention with no
+    sign-flipping needed.
+
+    Also stamps each transaction dict's own 'balance' field with its running
+    total along the way, for the transactions table's audit trail. Returns
+    (new_txns_sorted_with_balance, computed_ending_balance) - the caller
+    shows computed_ending_balance in an EDITABLE field so Allen can override
+    it with a real known figure before confirming the import.
+
+    IMPORTANT: only ever call this on the post-dedup new_txns list, never on
+    parse_chase_creditcard_csv's raw output - see that function's docstring
+    for why."""
+    ordered = sorted(new_txns, key=lambda t: t["txn_date"])
+    running = prior_ending_balance
+    for t in ordered:
+        amount = t["deposit"] if t["deposit"] is not None else -(t["withdrawal"] or 0)
+        running += amount
+        t["balance"] = round(running, 2)
+    return ordered, round(running, 2)
+
+
+def find_new_transactions(account_key, parsed_txns, demo=False):
+    """Split freshly parsed transactions into (new, already_on_file) by
+    comparing against what's already stored for this account, matching on
+    (txn_date, description, signed amount). This isn't a perfect
+    fingerprint - two genuinely separate but identical-looking transactions
+    (same merchant, same day, same amount) would look like one duplicate -
+    which is exactly why the import page shows every matched row explicitly
+    rather than just printing a count, so Allen can catch that rare case
+    before confirming rather than have it silently dropped."""
+    existing = load_transactions(account_key=account_key, demo=demo)
+    existing_keys = set()
+    for t in existing:
+        amt = t["deposit"] if t.get("deposit") is not None else -(t.get("withdrawal") or 0)
+        existing_keys.add((t["txn_date"], (t.get("description") or "").strip(), round(float(amt), 2)))
+    new_txns, dup_txns = [], []
+    for t in parsed_txns:
+        amt = t["deposit"] if t["deposit"] is not None else -(t["withdrawal"] or 0)
+        key = (t["txn_date"], t["description"], round(float(amt), 2))
+        (dup_txns if key in existing_keys else new_txns).append(t)
+    return new_txns, dup_txns
+
+
+def check_for_gap(account_key, parsed_txns, demo=False):
+    """Warn if the earliest transaction in a fresh upload starts more than a
+    day after this account's current last_statement_date - the opposite
+    risk from duplicates: a downloaded date range that didn't reach back far
+    enough would silently under-count activity rather than over-count it.
+    Returns the gap size in days, or None if there's no account on file yet,
+    no transactions to check, or no gap."""
+    accounts = load_accounts(demo=demo)
+    acct = next((a for a in accounts if a["account_key"] == account_key), None)
+    if not acct or not acct.get("last_statement_date") or not parsed_txns:
+        return None
+    last_on_file = date.fromisoformat(acct["last_statement_date"])
+    earliest_new = min(date.fromisoformat(t["txn_date"]) for t in parsed_txns)
+    gap_days = (earliest_new - last_on_file).days
+    return gap_days if gap_days > 1 else None
+
+
+def commit_csv_import(account_key, statement_date, ending_balance, new_txns, source_file, demo=False):
+    """Write one CSV-import batch: every row in new_txns (already filtered
+    down to the non-duplicate ones by the page before calling this) into
+    `transactions`, one account_monthly_summaries row summarizing the batch,
+    and a refresh of the account's own last_statement_date/
+    last_ending_balance - same end result as save_manual_entry(), just
+    covering a batch of transactions instead of one typed-in balance.
+
+    demo=True no-ops immediately, same as save_manual_entry - this is a
+    write path and Demo Mode never writes, and the import UI itself never
+    even renders in Demo Mode, so this is a second layer of defense rather
+    than the only guard."""
+    if demo:
+        return
+    if not new_txns:
+        return
+    client = get_client()
+    prior = latest_summary_for_account(account_key)
+    beginning_balance = prior["ending_balance"] if prior else (ending_balance - sum(
+        (t["deposit"] or 0) - (t["withdrawal"] or 0) for t in new_txns
+    ))
+    total_deposits = round(sum(t["deposit"] for t in new_txns if t["deposit"]), 2)
+    total_withdrawals = round(sum(t["withdrawal"] for t in new_txns if t["withdrawal"]), 2)
+
+    rows = [{
+        "account_key": account_key,
+        "statement_date": statement_date,
+        "txn_date": t["txn_date"],
+        "deposit": t["deposit"],
+        "withdrawal": t["withdrawal"],
+        "balance": t["balance"],
+        "description": t["description"],
+        "source_file": source_file,
+    } for t in new_txns]
+    client.table("transactions").insert(rows).execute()
+
+    client.table("account_monthly_summaries").upsert({
+        "account_key": account_key,
+        "statement_date": statement_date,
+        "beginning_balance": round(beginning_balance, 2),
+        "total_deposits": total_deposits,
+        "total_withdrawals": total_withdrawals,
+        "ending_balance": round(ending_balance, 2),
+        "dividends_paid": 0.0,
+        "source_file": source_file,
+    }, on_conflict="account_key,statement_date").execute()
+
+    current_last = prior["statement_date"] if prior else None
+    if current_last is None or statement_date >= current_last:
+        client.table("accounts").update({
+            "last_statement_date": statement_date,
+            "last_ending_balance": round(ending_balance, 2),
+        }).eq("account_key", account_key).execute()
+
+    load_monthly_summaries.clear()
+    load_accounts.clear()
+    load_transactions.clear()
 
 
 def nearest_statement_on_or_before(summaries_for_account, target_date):
