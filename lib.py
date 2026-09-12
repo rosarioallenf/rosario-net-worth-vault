@@ -334,14 +334,15 @@ def load_transactions(account_key=None, demo=False):
 CHASE_BANK_CSV_COLUMNS = {"Details", "Posting Date", "Description", "Amount", "Type", "Balance"}
 CHASE_CARD_CSV_COLUMNS = {"Transaction Date", "Post Date", "Description", "Type", "Amount"}
 ASCEND_BANK_CSV_COLUMNS = {"Account ID", "Transaction ID", "Date", "Description", "Amount", "Balance"}
+CITI_CARD_CSV_COLUMNS = {"Status", "Date", "Description", "Debit", "Credit"}
 
 
 def detect_csv_profile(df):
     """Given a freshly-read CSV as a DataFrame, return which known
     institution/account-type profile it matches ('chase_bank', 'chase_card',
-    'ascend_bank'), or None if it doesn't match anything built yet. Matching
-    is by column presence, not file name, since Allen renames/downloads
-    these however his browser or the bank names them."""
+    'ascend_bank', 'citi_card'), or None if it doesn't match anything built
+    yet. Matching is by column presence, not file name, since Allen
+    renames/downloads these however his browser or the bank names them."""
     cols = set(df.columns)
     if CHASE_BANK_CSV_COLUMNS.issubset(cols):
         return "chase_bank"
@@ -349,6 +350,8 @@ def detect_csv_profile(df):
         return "chase_card"
     if ASCEND_BANK_CSV_COLUMNS.issubset(cols):
         return "ascend_bank"
+    if CITI_CARD_CSV_COLUMNS.issubset(cols):
+        return "citi_card"
     return None
 
 
@@ -494,6 +497,67 @@ def parse_chase_creditcard_csv(raw_bytes):
         })
     statement_date = df["Transaction Date"].max().isoformat()
     return txns, statement_date
+
+
+def parse_citi_creditcard_csv(raw_bytes):
+    """Parse a Citi credit card export into a flat list of transactions -
+    txn_date, description, deposit/withdrawal. Same no-balance-column
+    situation as Chase's credit card CSV: call find_new_transactions() then
+    roll_forward_balance() on the result, never roll forward over this
+    function's raw output directly (see parse_chase_creditcard_csv's
+    docstring for why).
+
+    Citi splits the signed amount into two separate columns (Debit/Credit)
+    rather than Chase's one signed Amount column, and only one row is
+    populated per transaction. Sign is taken from which COLUMN is
+    populated, not from whatever raw sign Citi happens to print in it: a
+    Debit is money charged to the card (increases what's owed, so becomes
+    a negative/withdrawal contribution here) and a Credit is money credited
+    back (a payment or a merchant return - decreases what's owed, so
+    becomes a positive/deposit contribution), regardless of whether Citi's
+    own export writes that Credit value as a positive or a negative number.
+    NOTE: only one real Credit example has been seen so far (a Costco
+    return, written as '-12.99' in Citi's own file) - this treats it as a
+    $12.99 reduction in what's owed, which matches the return it appears to
+    represent, but is worth Allen double-checking against his statement the
+    first time a Credit row shows up, since the sample size is exactly one.
+
+    Only rows with Status 'Cleared' are included - a 'Pending' row (if
+    Citi's export ever includes one) can still change amount or disappear
+    before it posts for real, so it's dropped rather than archived as if
+    final. Folds the optional Member Name column into the description
+    (this is a shared card with both Allen's and Maria's names on it), same
+    convention as Chase's optional Card column.
+
+    Returns (transactions, statement_date)."""
+    df = pd.read_csv(io.BytesIO(raw_bytes), index_col=False)
+    n_before = len(df)
+    df = df[df["Status"].astype(str).str.strip().str.lower() == "cleared"].copy()
+    n_dropped = n_before - len(df)
+    df["Date"] = pd.to_datetime(df["Date"], format="%m/%d/%Y").dt.date
+    df = df.sort_values("Date")
+    txns = []
+    for _, row in df.iterrows():
+        debit = row.get("Debit")
+        credit = row.get("Credit")
+        if pd.notna(debit):
+            amount = -abs(float(debit))
+        elif pd.notna(credit):
+            amount = abs(float(credit))
+        else:
+            amount = 0.0
+        description = str(row["Description"]).strip()
+        member = row.get("Member Name")
+        if pd.notna(member) and str(member).strip():
+            description = f"{description} [{member}]"
+        txns.append({
+            "txn_date": row["Date"].isoformat(),
+            "description": description,
+            "deposit": amount if amount > 0 else None,
+            "withdrawal": round(abs(amount), 2) if amount < 0 else None,
+        })
+    statement_date = df["Date"].max().isoformat()
+    return txns, statement_date, n_dropped
 
 
 def roll_forward_balance(prior_ending_balance, new_txns):
