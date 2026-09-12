@@ -29,10 +29,18 @@ require_passphrase()
 # above the title. Only affects this page. If a future Streamlit version
 # renames these internal data-testid hooks, this stops applying and the
 # page just falls back to normal (larger) sizing - harmless either way.
+#
+# padding-top bumped from 2rem to 3.5rem (2026-09-12): 2rem trimmed away
+# too much clearance under Streamlit Cloud's own floating toolbar (the
+# Share/star/fork icon row it draws at the very top of the page), so the
+# first thing on the page - the Demo Mode banner, in Allen's bug report -
+# rendered tucked up underneath it and looked cut off/overlapped. 3.5rem
+# still saves real space versus Streamlit's default (~6rem) but leaves
+# enough room to clear that toolbar.
 st.markdown(
     """
     <style>
-    .block-container { padding-top: 2rem; }
+    .block-container { padding-top: 3.5rem; }
     h1 { font-size: 1.6rem !important; }
     div[data-testid="stMetric"] { padding: 0.15rem 0 !important; }
     div[data-testid="stMetricValue"] { font-size: 1.3rem !important; }
