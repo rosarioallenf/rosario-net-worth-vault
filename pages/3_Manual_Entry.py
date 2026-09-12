@@ -11,10 +11,10 @@ rather than a separate page:
   a) Manual entry of an ending balance + as-of date (original, unchanged) -
      for balance-only accounts: real estate, vehicles, LPL, Allianz, and
      Fidelity (whose own trading app already covers its transactions).
-  b) Upload a CSV - for Chase bank/credit card "download activity" exports
-     and Ascend Federal Credit Union "Transactions" exports today; more
-     institutions/profiles can be added to detect_csv_profile()/lib.py over
-     time without changing this page.
+  b) Upload a CSV - for Chase bank/credit card "download activity" exports,
+     Ascend Federal Credit Union "Transactions" exports, and Citi credit
+     card exports today; more institutions/profiles can be added to
+     detect_csv_profile()/lib.py over time without changing this page.
   c) Upload a PDF - not built yet (JPM's monthly consolidated statement is
      handled by a standalone script for now, run outside the app); a
      Manual-Entry PDF mode is still on the roadmap; placeholder message for
@@ -41,6 +41,7 @@ from lib import (
     parse_chase_bank_csv,
     parse_chase_creditcard_csv,
     parse_ascend_bank_csv,
+    parse_citi_creditcard_csv,
     find_new_transactions,
     check_for_gap,
     roll_forward_balance,
@@ -158,10 +159,11 @@ if mode == "Manual balance entry":
 elif mode == "Upload a CSV":
     st.caption(
         "Works today for Chase checking/savings, Chase credit card "
-        "'Download activity' exports, and Ascend Federal Credit Union "
-        "'Transactions' exports. Every transaction gets archived, "
-        "already-on-file rows are detected and skipped automatically, and "
-        "you'll see everything before anything is saved."
+        "'Download activity' exports, Ascend Federal Credit Union "
+        "'Transactions' exports, and Citi credit card exports. Every "
+        "transaction gets archived, already-on-file rows are detected and "
+        "skipped automatically, and you'll see everything before anything "
+        "is saved."
     )
     uploaded = st.file_uploader("CSV export", type=["csv"], key=f"csv_{account_key}")
 
@@ -177,8 +179,8 @@ elif mode == "Upload a CSV":
         if profile is None:
             st.error(
                 "Unrecognized CSV format - this doesn't match a Chase bank, "
-                "Chase credit card, or Ascend 'Transactions' export. No "
-                f"columns matched. File's columns: {list(preview_df.columns)}"
+                "Chase credit card, Ascend 'Transactions', or Citi credit "
+                f"card export. No columns matched. File's columns: {list(preview_df.columns)}"
             )
             st.stop()
 
@@ -186,11 +188,16 @@ elif mode == "Upload a CSV":
             "chase_bank": "Chase bank/checking",
             "chase_card": "Chase credit card",
             "ascend_bank": "Ascend Federal Credit Union",
+            "citi_card": "Citi credit card",
         }
+        n_pending_dropped = 0
         if profile in ("chase_bank", "ascend_bank"):
             parse_fn = parse_chase_bank_csv if profile == "chase_bank" else parse_ascend_bank_csv
             all_txns, file_ending_balance, statement_date = parse_fn(raw)
             authoritative_balance = True
+        elif profile == "citi_card":
+            all_txns, statement_date, n_pending_dropped = parse_citi_creditcard_csv(raw)
+            authoritative_balance = False
         else:  # chase_card
             all_txns, statement_date = parse_chase_creditcard_csv(raw)
             authoritative_balance = False
@@ -208,6 +215,13 @@ elif mode == "Upload a CSV":
             st.caption(
                 f"This file's own account identifier: {', '.join(sorted(file_account_ids))} - "
                 "double check that matches the account you picked above before importing."
+            )
+
+        if n_pending_dropped:
+            st.caption(
+                f"{n_pending_dropped} row(s) in this file weren't 'Cleared' yet, so they were "
+                "left out - a pending charge can still change or disappear before it posts for "
+                "real. Re-upload once they've cleared to pick them up."
             )
 
         if gap_days:
