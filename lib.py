@@ -36,16 +36,28 @@ def require_passphrase():
         return
 
     st.title("Rosario Net Worth Vault")
-    pw = st.text_input("Passphrase", type="password")
-    enter_col, demo_col = st.columns(2)
-    if enter_col.button("Enter") or pw:
+    # The passphrase field + its submit live inside their own st.form. This
+    # matters: previously "Enter" was checked with `button("Enter") or pw`,
+    # which went true any time the passphrase field simply HELD TEXT - e.g.
+    # from a browser auto-filling a saved password into a password-type
+    # field - regardless of which button was actually clicked. That let a
+    # click on "View demo" get silently intercepted and logged in for real
+    # instead (found via Allen's bug report 2026-09-12: choosing demo kept
+    # showing his real numbers, even right after logging out). A st.form's
+    # submit flag is only ever true from that form's own submit button being
+    # pressed, never from a field merely being non-empty, so it can no
+    # longer cross-talk with the separate "View demo" button below.
+    with st.form("passphrase_form"):
+        pw = st.text_input("Passphrase", type="password")
+        submitted = st.form_submit_button("Enter")
+    if submitted:
         if pw == st.secrets["APP_PASSPHRASE"]:
             st.session_state["authed"] = True
             st.rerun()
-        elif pw:
+        else:
             st.error("Incorrect passphrase.")
     st.caption("Don't have the passphrase? You can still look around with sample data.")
-    if demo_col.button("View demo (sample data, no real numbers)"):
+    if st.button("View demo (sample data, no real numbers)"):
         st.session_state["demo_mode"] = True
         st.rerun()
     st.stop()
@@ -62,7 +74,6 @@ def is_demo():
     return bool(st.session_state.get("demo_mode"))
 
 
-@st.cache_resource
 def get_client():
     """Supabase client using the service_role key - this key bypasses Row
     Level Security, which is intentional here: RLS is what keeps the
@@ -77,7 +88,17 @@ def get_client():
     what catches it if some page ever forgets to pass demo=is_demo() through
     correctly (a stale unpasted file, a copy-paste slip, a future edit that
     misses a call site) - the failure becomes an error on screen instead of
-    Allen's real numbers appearing where sample data should be."""
+    Allen's real numbers appearing where sample data should be.
+
+    This check deliberately sits OUTSIDE the cached part (_get_real_client,
+    just below): st.cache_resource only re-runs a function's body on its
+    very first call and hands back the same cached object every time after
+    that - so if the check lived inside the cached function, it would only
+    ever fire once, the first time this is called anywhere in the app. Once
+    any real (non-demo) visit had cached a connection, a later demo-mode
+    call would just receive that cached real client straight from cache,
+    silently, with the safety check never re-executing at all. Keeping the
+    check here, outside the cache, means it runs on every single call."""
     if st.session_state.get("demo_mode"):
         raise RuntimeError(
             "Refused to connect to the real database while Demo Mode is active. "
@@ -87,6 +108,14 @@ def get_client():
             "of lib.py and every file under pages/ - one of them is likely an "
             "older version missing the demo-mode support."
         )
+    return _get_real_client()
+
+
+@st.cache_resource
+def _get_real_client():
+    """The actual (expensive) connection setup - this part is fine to
+    cache, since by the time it's called get_client() has already confirmed
+    Demo Mode is not active for this call."""
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SERVICE_KEY"])
 
 
