@@ -11,11 +11,14 @@ rather than a separate page:
   a) Manual entry of an ending balance + as-of date (original, unchanged) -
      for balance-only accounts: real estate, vehicles, LPL, Allianz, and
      Fidelity (whose own trading app already covers its transactions).
-  b) Upload a CSV - for Chase bank and credit card "download activity"
-     exports today; more institutions/profiles can be added to
-     detect_csv_profile()/lib.py over time without changing this page.
-  c) Upload a PDF - not built yet (JPM multi-account statements are next
-     up after Chase CSVs are proven out); placeholder message for now.
+  b) Upload a CSV - for Chase bank/credit card "download activity" exports
+     and Ascend Federal Credit Union "Transactions" exports today; more
+     institutions/profiles can be added to detect_csv_profile()/lib.py over
+     time without changing this page.
+  c) Upload a PDF - not built yet (JPM's monthly consolidated statement is
+     handled by a standalone script for now, run outside the app); a
+     Manual-Entry PDF mode is still on the roadmap; placeholder message for
+     now.
 
 Two-step institution -> account picker, per Allen's own suggestion, so this
 scales cleanly as more accounts get added instead of one long dropdown -
@@ -37,6 +40,7 @@ from lib import (
     detect_csv_profile,
     parse_chase_bank_csv,
     parse_chase_creditcard_csv,
+    parse_ascend_bank_csv,
     find_new_transactions,
     check_for_gap,
     roll_forward_balance,
@@ -153,12 +157,13 @@ if mode == "Manual balance entry":
 # ---------------------------------------------------------------------------
 elif mode == "Upload a CSV":
     st.caption(
-        "Works today for Chase checking/savings and Chase credit card "
-        "'Download activity' exports. Every transaction gets archived, "
+        "Works today for Chase checking/savings, Chase credit card "
+        "'Download activity' exports, and Ascend Federal Credit Union "
+        "'Transactions' exports. Every transaction gets archived, "
         "already-on-file rows are detected and skipped automatically, and "
         "you'll see everything before anything is saved."
     )
-    uploaded = st.file_uploader("Chase CSV export", type=["csv"], key=f"csv_{account_key}")
+    uploaded = st.file_uploader("CSV export", type=["csv"], key=f"csv_{account_key}")
 
     if uploaded is not None:
         raw = uploaded.getvalue()
@@ -171,14 +176,20 @@ elif mode == "Upload a CSV":
         profile = detect_csv_profile(preview_df)
         if profile is None:
             st.error(
-                "Unrecognized CSV format - this doesn't match a Chase bank or "
-                "Chase credit card 'Download activity' export. No columns "
-                f"matched. File's columns: {list(preview_df.columns)}"
+                "Unrecognized CSV format - this doesn't match a Chase bank, "
+                "Chase credit card, or Ascend 'Transactions' export. No "
+                f"columns matched. File's columns: {list(preview_df.columns)}"
             )
             st.stop()
 
-        if profile == "chase_bank":
-            all_txns, file_ending_balance, statement_date = parse_chase_bank_csv(raw)
+        PROFILE_LABELS = {
+            "chase_bank": "Chase bank/checking",
+            "chase_card": "Chase credit card",
+            "ascend_bank": "Ascend Federal Credit Union",
+        }
+        if profile in ("chase_bank", "ascend_bank"):
+            parse_fn = parse_chase_bank_csv if profile == "chase_bank" else parse_ascend_bank_csv
+            all_txns, file_ending_balance, statement_date = parse_fn(raw)
             authoritative_balance = True
         else:  # chase_card
             all_txns, statement_date = parse_chase_creditcard_csv(raw)
@@ -189,9 +200,15 @@ elif mode == "Upload a CSV":
 
         st.write(
             f"Parsed **{len(all_txns)}** transaction(s) from this file "
-            f"({'{}'.format('Chase bank/checking' if profile == 'chase_bank' else 'Chase credit card')} format), "
-            f"covering through **{statement_date}**."
+            f"({PROFILE_LABELS[profile]} format), covering through **{statement_date}**."
         )
+
+        file_account_ids = {t["source_account_id"] for t in all_txns if t.get("source_account_id")}
+        if file_account_ids:
+            st.caption(
+                f"This file's own account identifier: {', '.join(sorted(file_account_ids))} - "
+                "double check that matches the account you picked above before importing."
+            )
 
         if gap_days:
             st.warning(
