@@ -12,6 +12,16 @@ def require_passphrase():
     looks like/does without ever exposing his and Maria's real numbers).
     Call this as the first line of every page script."""
     if st.session_state.get("authed"):
+        # Deliberate way back to the login/demo choice screen - without this,
+        # once authed=True there was no way to reach Demo Mode again in the
+        # same browser tab except a brand-new incognito session (found via
+        # Allen's bug report 2026-09-12: he clicked "View demo" but the app
+        # just kept showing his real numbers, because this branch returns
+        # before demo_mode is ever checked).
+        with st.sidebar:
+            if st.button("Log out"):
+                st.session_state.clear()
+                st.rerun()
         return
 
     if st.session_state.get("demo_mode"):
