@@ -25,14 +25,20 @@ def require_passphrase():
         return
 
     if st.session_state.get("demo_mode"):
-        banner_col, exit_col = st.columns([5, 1])
-        banner_col.info(
+        # The exit control now lives in the sidebar, matching the "Log out"
+        # button in the authed branch above - not crammed into a thin column
+        # next to the banner, which is where it got visually lost/overlapped
+        # by Streamlit Cloud's own floating toolbar (Allen's report,
+        # 2026-09-12: "no logout button" + "screen cut off at top" turned out
+        # to be the same underlying layout issue).
+        with st.sidebar:
+            if st.button("Exit demo"):
+                st.session_state["demo_mode"] = False
+                st.rerun()
+        st.info(
             "🔍 **Demo Mode** — you're viewing sample data, not Allen and Maria's real "
             "numbers. Reload the page and enter the real passphrase to see actual data."
         )
-        if exit_col.button("Exit demo"):
-            st.session_state["demo_mode"] = False
-            st.rerun()
         return
 
     st.title("Rosario Net Worth Vault")
