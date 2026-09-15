@@ -732,29 +732,42 @@ def commit_csv_import(account_key, statement_date, ending_balance, new_txns, sou
 # ---------------------------------------------------------------------------
 
 ESTATE_BUCKET = "estate-documents"
+# 50 MB - a scanned, multi-page legal document (the Revocable Trust upload
+# that first exposed this limit was 93.2MB) can run far bigger than a
+# typical text PDF, since it's page-image scans, not text. 50MB is Supabase's
+# own documented Free-plan project-wide upload ceiling - a per-bucket limit
+# can never exceed the project's global limit, so there's no point setting
+# this higher without also confirming/raising the project-level setting
+# (Settings -> Storage in the Supabase dashboard) on a paid plan first.
+ESTATE_BUCKET_FILE_SIZE_LIMIT = 50 * 1024 * 1024
 
 
 @st.cache_resource
 def ensure_estate_bucket():
-    """Idempotently create the private 'estate-documents' Storage bucket the
-    first time it's needed. @st.cache_resource means this only actually
-    calls out to Supabase once per running app instance (not once per page
-    load) - safe, since bucket creation is a one-time thing and this is
-    cheap to skip on every subsequent call. Swallows the "already exists"
-    error from a bucket created by an earlier app instance/deploy, since
-    that's the expected steady state, not a failure."""
+    """Idempotently create (or, if it already exists from an older app
+    instance/deploy, update) the private 'estate-documents' Storage bucket.
+    @st.cache_resource means this only actually calls out to Supabase once
+    per running app instance (not once per page load).
+
+    The update_bucket() call on the "already exists" path matters, not just
+    belt-and-suspenders: the bucket was first created (2026-09-15) with a
+    25MB file_size_limit, too small for a real scanned legal document, so
+    without this update every app instance since would keep re-hitting that
+    original 25MB cap forever, no matter how high
+    ESTATE_BUCKET_FILE_SIZE_LIMIT is raised here in code - create_bucket()
+    only ever applies to a bucket that doesn't exist yet."""
     client = get_client()
+    options = {
+        "public": False,
+        "allowed_mime_types": ["application/pdf"],
+        "file_size_limit": ESTATE_BUCKET_FILE_SIZE_LIMIT,
+    }
     try:
-        client.storage.create_bucket(
-            ESTATE_BUCKET,
-            options={
-                "public": False,
-                "allowed_mime_types": ["application/pdf"],
-                "file_size_limit": 25 * 1024 * 1024,  # 25 MB
-            },
-        )
+        client.storage.create_bucket(ESTATE_BUCKET, options=options)
     except Exception as e:
-        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+        if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+            client.storage.update_bucket(ESTATE_BUCKET, options=options)
+        else:
             raise
     return True
 
