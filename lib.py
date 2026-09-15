@@ -713,6 +713,127 @@ def commit_csv_import(account_key, statement_date, ending_balance, new_txns, sou
     load_transactions.clear()
 
 
+# ---------------------------------------------------------------------------
+# Estate Documents (built 2026-09-15) - an index of estate-planning documents
+# (Revocable Trust, will, powers of attorney, etc.) plus optional PDF COPIES
+# of each, stored in a private Supabase Storage bucket. This is deliberately
+# a convenience copy, never the primary record: the signed, notarized
+# originals stay in the home safe, and this page/table just tracks what
+# exists and where the original lives, same "index, not custody" framing
+# Allen and Claude worked through together before building this.
+#
+# This whole feature blocks entirely in Demo Mode (same treatment as Manual
+# Entry) - even the INDEX content here (document titles, where originals are
+# kept) is real, sensitive information, not something safe to show a
+# passphrase-less visitor, so there's no DEMO_ESTATE_DOCUMENTS sample data
+# at all and the page itself never calls these with demo=True. The
+# demo=False params below exist only so a future accidental call is a quiet
+# no-op/empty-result rather than a crash reaching for real data.
+# ---------------------------------------------------------------------------
+
+ESTATE_BUCKET = "estate-documents"
+
+
+@st.cache_resource
+def ensure_estate_bucket():
+    """Idempotently create the private 'estate-documents' Storage bucket the
+    first time it's needed. @st.cache_resource means this only actually
+    calls out to Supabase once per running app instance (not once per page
+    load) - safe, since bucket creation is a one-time thing and this is
+    cheap to skip on every subsequent call. Swallows the "already exists"
+    error from a bucket created by an earlier app instance/deploy, since
+    that's the expected steady state, not a failure."""
+    client = get_client()
+    try:
+        client.storage.create_bucket(
+            ESTATE_BUCKET,
+            options={
+                "public": False,
+                "allowed_mime_types": ["application/pdf"],
+                "file_size_limit": 25 * 1024 * 1024,  # 25 MB
+            },
+        )
+    except Exception as e:
+        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+            raise
+    return True
+
+
+@st.cache_data(ttl=300)
+def load_estate_documents(demo=False):
+    if demo:
+        return []
+    client = get_client()
+    resp = client.table("estate_documents").select("*").order("doc_key").execute()
+    return resp.data
+
+
+def slugify_doc_key(title):
+    """Turn a typed-in title into a short natural key, same spirit as this
+    vault's account_key convention - lowercase, spaces/punctuation collapsed
+    to single hyphens, e.g. 'Power of Attorney (Financial)' ->
+    'power-of-attorney-financial'."""
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", title.strip().lower()).strip("-")
+    return slug or "document"
+
+
+def save_estate_document_entry(doc_key, title, description, original_location, notes, demo=False):
+    """Create or update one document's INDEX entry (title/description/where
+    the original lives/notes) - no PDF involved here. Upserts on doc_key, so
+    editing an existing entry's details is the same call as creating a new
+    one. demo=True no-ops, same second-layer-of-defense pattern as
+    save_manual_entry - the page itself never renders this in Demo Mode."""
+    if demo:
+        return
+    client = get_client()
+    client.table("estate_documents").upsert({
+        "doc_key": doc_key,
+        "title": title,
+        "description": description,
+        "original_location": original_location,
+        "notes": notes,
+        "updated_at": "now()",
+    }, on_conflict="doc_key").execute()
+    load_estate_documents.clear()
+
+
+def upload_estate_document_pdf(doc_key, file_bytes, demo=False):
+    """Upload (or replace) the PDF copy for one document. Stores the object
+    at '<doc_key>.pdf' inside the private estate-documents bucket - upsert
+    file option means this same call handles both the first upload and
+    every later replacement, no separate "update" path needed. Then stamps
+    the index row's storage_path/uploaded_at so the page knows a copy
+    exists. demo=True no-ops, same pattern as every other write here."""
+    if demo:
+        return
+    ensure_estate_bucket()
+    client = get_client()
+    storage_path = f"{doc_key}.pdf"
+    client.storage.from_(ESTATE_BUCKET).upload(
+        storage_path,
+        file_bytes,
+        file_options={"content-type": "application/pdf", "upsert": "true"},
+    )
+    from datetime import datetime, timezone
+    client.table("estate_documents").update({
+        "storage_path": storage_path,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": "now()",
+    }).eq("doc_key", doc_key).execute()
+    load_estate_documents.clear()
+
+
+def download_estate_document_pdf(storage_path, demo=False):
+    """Return the raw PDF bytes for one document's storage_path. demo=True
+    returns None rather than reaching for real data - unreachable in
+    practice since the page blocks entirely in Demo Mode."""
+    if demo:
+        return None
+    client = get_client()
+    return client.storage.from_(ESTATE_BUCKET).download(storage_path)
+
+
 def nearest_statement_on_or_before(summaries_for_account, target_date):
     """Given one account's monthly summaries (each with a 'statement_date'
     string YYYY-MM-DD) and a target date, return the row with the latest
